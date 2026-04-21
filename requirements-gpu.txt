@@ -1,0 +1,9 @@
+# Install this after requirements.txt when running the batch pipeline on an NVIDIA GPU.
+# Example:
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+--no-deps
+
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128

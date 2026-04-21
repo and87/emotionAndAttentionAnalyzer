@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data and generated outputs
+video/
+csv/
+csv_*/
+*.csv
+
+# Large model artifacts and downloaded weights
+*.pt
+*.pth
+*.pkl
+*.h5
+*.onnx
+*.dat
+*.zip
+OpenFace-3.0/weights/
+OpenFace-3.0/feature_maps_output/
+EmotiEffLib/models/
+
+# Media artifacts
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.webm
+
+# Local-only scratch files
+merge.py
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
