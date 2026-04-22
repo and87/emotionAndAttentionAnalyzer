@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -91,12 +92,14 @@ class VideoAnalysis:
         analyzer: AttentionAnalyzer,
         frame_step: int = 2,
         engagement_window: int = 128,
+        progress_every: int = 50,
     ) -> None:
         self.video_path = video_path
         self.output_path = output_path
         self.analyzer = analyzer
         self.frame_step = max(frame_step, 1)
         self.engagement_window = max(engagement_window, 1)
+        self.progress_every = max(progress_every, 1)
         self.engagement_features: deque[Any] = deque(maxlen=self.engagement_window)
         self.pending_initial_rows: list[list[Any]] = []
         self.has_full_engagement_window = False
@@ -142,6 +145,8 @@ class VideoAnalysis:
     def process_frames(self) -> None:
         frame_number = 0
         aborted = False
+        analyzed_frames = 0
+        started_at = time.perf_counter()
         try:
             while frame_number < self.total_frame_count:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -165,11 +170,24 @@ class VideoAnalysis:
                     row = self._empty_row(timestamp)
 
                 self._write_or_buffer_row(row, temporal_engagement)
+                analyzed_frames += 1
+                if analyzed_frames == 1 or analyzed_frames % self.progress_every == 0:
+                    self._print_progress(frame_number, analyzed_frames, started_at)
                 frame_number += self.frame_step
         finally:
             if not aborted:
                 self._flush_pending_initial_rows()
             self.cap.release()
+
+    def _print_progress(self, frame_number: int, analyzed_frames: int, started_at: float) -> None:
+        elapsed = max(time.perf_counter() - started_at, 1e-6)
+        percent = (frame_number / max(self.total_frame_count, 1)) * 100.0
+        fps = analyzed_frames / elapsed
+        print(
+            f"Progress: frame {frame_number}/{self.total_frame_count} "
+            f"({percent:.1f}%), analyzed={analyzed_frames}, speed={fps:.2f} analyzed fps",
+            flush=True,
+        )
 
     def _update_temporal_engagement(self, analysis: dict[Any, Any]) -> dict[str, Any]:
         if analysis.get("faces", 0) <= 0:
@@ -286,6 +304,12 @@ def parse_args() -> argparse.Namespace:
         default=128,
         help="Number of analyzed face frames used by the temporal EmotiEffLib engagement classifier.",
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=50,
+        help="Print batch progress every N analyzed frames.",
+    )
     return parser.parse_args()
 
 
@@ -366,6 +390,7 @@ def main() -> None:
             analyzer,
             frame_step=args.frame_step,
             engagement_window=args.engagement_window,
+            progress_every=args.progress_every,
         )
         video.get_video_info()
         video.write_header()
