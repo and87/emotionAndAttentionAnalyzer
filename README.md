@@ -46,6 +46,7 @@ Scelte importanti:
 
 - `timm==0.9.16` e' stato scelto come compromesso compatibile con `EmotiEffLib`, che documenta il ramo `0.9.*`.
 - Per OpenCV e' stato installato `opencv-contrib-python`, che copre anche gli use case del pacchetto base.
+- `Pillow` usa un pin condizionale: `9.4.0` su Python < 3.12 e `12.2.0` su Python >= 3.12, per evitare build da sorgente senza header JPEG su Ubuntu 24.04.
 - `EmotiEffLib` e' installata in editable mode dal clone locale.
 
 Comando di installazione:
