@@ -47,6 +47,15 @@ CSV_COLUMNS = [
 ]
 
 
+FATAL_ACCELERATOR_ERROR_MARKERS = (
+    "CUDA error",
+    "no kernel image is available",
+    "device-side assert",
+    "CUBLAS_STATUS_ARCH_MISMATCH",
+    "not compatible with the current PyTorch installation",
+)
+
+
 def csv_value(value: Any) -> str:
     if value is None:
         return "None"
@@ -67,6 +76,11 @@ def find_videos(video_root: Path) -> list[Path]:
         for path in video_root.rglob("*")
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
     )
+
+
+def is_fatal_accelerator_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(marker in message for marker in FATAL_ACCELERATOR_ERROR_MARKERS)
 
 
 class VideoAnalysis:
@@ -127,6 +141,7 @@ class VideoAnalysis:
 
     def process_frames(self) -> None:
         frame_number = 0
+        aborted = False
         try:
             while frame_number < self.total_frame_count:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -141,13 +156,19 @@ class VideoAnalysis:
                     temporal_engagement = self._update_temporal_engagement(analysis)
                     row = self._row_from_analysis(timestamp, analysis, temporal_engagement)
                 except Exception as exc:
+                    if is_fatal_accelerator_error(exc):
+                        aborted = True
+                        raise RuntimeError(
+                            f"Fatal accelerator error while processing frame {frame_number}: {exc}"
+                        ) from exc
                     print(f"Frame {frame_number}: analysis failed: {exc}")
                     row = self._empty_row(timestamp)
 
                 self._write_or_buffer_row(row, temporal_engagement)
                 frame_number += self.frame_step
         finally:
-            self._flush_pending_initial_rows()
+            if not aborted:
+                self._flush_pending_initial_rows()
             self.cap.release()
 
     def _update_temporal_engagement(self, analysis: dict[Any, Any]) -> dict[str, Any]:
@@ -285,6 +306,31 @@ def describe_device(device: torch.device) -> str:
     return f"cuda:{index} ({name}, {memory_gb:.1f} GB)"
 
 
+def assert_device_can_execute(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    try:
+        torch.cuda.set_device(index)
+        with torch.no_grad():
+            sample = torch.ones((16, 16), device=device)
+            _ = (sample @ sample).sum().item()
+        torch.cuda.synchronize(device)
+    except Exception as exc:
+        name = torch.cuda.get_device_name(index)
+        capability = ".".join(str(part) for part in torch.cuda.get_device_capability(index))
+        supported_arches = ", ".join(torch.cuda.get_arch_list()) or "unknown"
+        raise SystemExit(
+            "CUDA is visible, but PyTorch cannot execute kernels on this GPU.\n"
+            f"GPU: {name} (compute capability sm_{capability.replace('.', '')})\n"
+            f"PyTorch: {torch.__version__}, built CUDA: {torch.version.cuda}\n"
+            f"PyTorch supported CUDA arch list: {supported_arches}\n"
+            "This usually means the installed torch CUDA wheel is not compatible with the GPU architecture. "
+            "Install a PyTorch build whose supported arch list includes this GPU, or run with --cpu."
+        ) from exc
+
+
 def main() -> None:
     args = parse_args()
     requested_device = requested_device_from_args(args)
@@ -308,6 +354,7 @@ def main() -> None:
     analyzer = AttentionAnalyzer(
         device=str(resolved_device),
     )
+    assert_device_can_execute(analyzer.device)
     print(f"Using device: {describe_device(analyzer.device)}")
     print(f"Found {len(videos)} video(s).")
 
