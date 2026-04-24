@@ -93,6 +93,7 @@ class VideoAnalysis:
         frame_step: int = 2,
         engagement_window: int = 128,
         progress_every: int = 50,
+        resume: bool = True,
     ) -> None:
         self.video_path = video_path
         self.output_path = output_path
@@ -100,9 +101,12 @@ class VideoAnalysis:
         self.frame_step = max(frame_step, 1)
         self.engagement_window = max(engagement_window, 1)
         self.progress_every = max(progress_every, 1)
+        self.resume = resume
         self.engagement_features: deque[Any] = deque(maxlen=self.engagement_window)
         self.pending_initial_rows: list[list[Any]] = []
         self.has_full_engagement_window = False
+        self.resume_row_count = 0
+        self.resume_start_frame = 0
 
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -115,6 +119,7 @@ class VideoAnalysis:
         self.fps = int(round(self.cap.get(cv2.CAP_PROP_FPS))) or 1
         self.duration_in_seconds = int(self.total_frame_count / self.fps)
         self.length = dt.timedelta(seconds=self.duration_in_seconds)
+        self.expected_row_count = (self.total_frame_count + self.frame_step - 1) // self.frame_step
 
     def get_video_info(self) -> None:
         print(f"Processing: {self.video_path}")
@@ -142,10 +147,41 @@ class VideoAnalysis:
             )
             writer.writerow(CSV_COLUMNS)
 
+    def prepare_output(self) -> bool:
+        if not self.resume or not self.output_path.exists():
+            self.write_header()
+            return False
+
+        resume_state = self._read_resume_state()
+        row_count = resume_state["row_count"]
+        self.resume_row_count = row_count
+
+        if row_count >= self.expected_row_count:
+            print(
+                f"Skipping completed video: {self.video_path} "
+                f"({row_count}/{self.expected_row_count} rows already present)",
+                flush=True,
+            )
+            return True
+
+        if row_count <= 0:
+            print(f"Restarting video from scratch (existing CSV has no usable data rows): {self.video_path}", flush=True)
+            self.write_header()
+            return False
+
+        self.resume_start_frame = row_count * self.frame_step
+        print(
+            f"Resuming video: {self.video_path} "
+            f"from frame {self.resume_start_frame} ({row_count}/{self.expected_row_count} rows already present)",
+            flush=True,
+        )
+        self._prime_temporal_state(resume_state["warmup_start_row"], row_count)
+        return False
+
     def process_frames(self) -> None:
-        frame_number = 0
+        frame_number = self.resume_start_frame
         aborted = False
-        analyzed_frames = 0
+        session_analyzed_frames = 0
         started_at = time.perf_counter()
         try:
             while frame_number < self.total_frame_count:
@@ -170,24 +206,87 @@ class VideoAnalysis:
                     row = self._empty_row(timestamp)
 
                 self._write_or_buffer_row(row, temporal_engagement)
-                analyzed_frames += 1
-                if analyzed_frames == 1 or analyzed_frames % self.progress_every == 0:
-                    self._print_progress(frame_number, analyzed_frames, started_at)
+                session_analyzed_frames += 1
+                total_analyzed_rows = self.resume_row_count + session_analyzed_frames
+                if session_analyzed_frames == 1 or session_analyzed_frames % self.progress_every == 0:
+                    self._print_progress(frame_number, total_analyzed_rows, session_analyzed_frames, started_at)
                 frame_number += self.frame_step
         finally:
             if not aborted:
                 self._flush_pending_initial_rows()
             self.cap.release()
 
-    def _print_progress(self, frame_number: int, analyzed_frames: int, started_at: float) -> None:
+    def _print_progress(
+        self,
+        frame_number: int,
+        total_analyzed_rows: int,
+        session_analyzed_frames: int,
+        started_at: float,
+    ) -> None:
         elapsed = max(time.perf_counter() - started_at, 1e-6)
         percent = (frame_number / max(self.total_frame_count, 1)) * 100.0
-        fps = analyzed_frames / elapsed
+        fps = session_analyzed_frames / elapsed
         print(
             f"Progress: frame {frame_number}/{self.total_frame_count} "
-            f"({percent:.1f}%), analyzed={analyzed_frames}, speed={fps:.2f} analyzed fps",
+            f"({percent:.1f}%), rows={total_analyzed_rows}/{self.expected_row_count}, "
+            f"speed={fps:.2f} analyzed fps",
             flush=True,
         )
+
+    def _read_resume_state(self) -> dict[str, Any]:
+        with self.output_path.open(newline="") as output_file:
+            rows = list(csv.reader(output_file, delimiter=";"))
+
+        header_index = next((index for index, row in enumerate(rows) if row == CSV_COLUMNS), None)
+        if header_index is None:
+            return {"row_count": 0, "warmup_start_row": 0}
+
+        data_rows = [row for row in rows[header_index + 1 :] if row and any(cell.strip() for cell in row)]
+        row_count = len(data_rows)
+        if row_count <= 0:
+            return {"row_count": 0, "warmup_start_row": 0}
+
+        face_rows_needed = max(self.engagement_window - 1, 0)
+        if face_rows_needed == 0:
+            return {"row_count": row_count, "warmup_start_row": row_count}
+
+        face_rows_found = 0
+        warmup_start_row = row_count
+        for index in range(row_count - 1, -1, -1):
+            if self._row_contains_face(data_rows[index]):
+                face_rows_found += 1
+            warmup_start_row = index
+            if face_rows_found >= face_rows_needed:
+                break
+
+        return {"row_count": row_count, "warmup_start_row": warmup_start_row}
+
+    @staticmethod
+    def _row_contains_face(row: list[str]) -> bool:
+        if len(row) < 2:
+            return False
+        try:
+            return int(row[1]) > 0
+        except ValueError:
+            return False
+
+    def _prime_temporal_state(self, warmup_start_row: int, row_count: int) -> None:
+        if warmup_start_row >= row_count:
+            return
+
+        print(
+            f"Priming temporal engagement state from rows {warmup_start_row}..{row_count - 1} before resuming",
+            flush=True,
+        )
+        for row_index in range(warmup_start_row, row_count):
+            frame_number = row_index * self.frame_step
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            analysis = self.analyzer.analyze_frame(frame, include_temporal_features=True)
+            self._update_temporal_engagement(analysis)
+        self.pending_initial_rows.clear()
 
     def _update_temporal_engagement(self, analysis: dict[Any, Any]) -> dict[str, Any]:
         if analysis.get("faces", 0) <= 0:
@@ -310,6 +409,13 @@ def parse_args() -> argparse.Namespace:
         default=50,
         help="Print batch progress every N analyzed frames.",
     )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Restart each video from scratch and overwrite existing CSV files.",
+    )
+    parser.set_defaults(resume=True)
     return parser.parse_args()
 
 
@@ -391,9 +497,11 @@ def main() -> None:
             frame_step=args.frame_step,
             engagement_window=args.engagement_window,
             progress_every=args.progress_every,
+            resume=args.resume,
         )
         video.get_video_info()
-        video.write_header()
+        if video.prepare_output():
+            continue
         video.process_frames()
 
 

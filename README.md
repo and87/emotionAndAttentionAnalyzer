@@ -83,6 +83,8 @@ Uso:
 Se `--device` viene omesso, viene usata automaticamente `cuda:0` se PyTorch vede CUDA, altrimenti `cpu`.
 `--require-gpu` evita fallback silenziosi: se CUDA non e' disponibile, il batch si ferma. All'avvio `main.py`
 stampa il device effettivo, per esempio `cuda:0 (NVIDIA GeForce ..., 4.0 GB)`.
+Se rilanci il batch dopo un'interruzione, il resume e' automatico: i video con CSV gia' completi vengono saltati
+e quelli con CSV parziale riprendono dal frame successivo. Per forzare la ripartenza da zero usare `--no-resume`.
 
 ## Demo Webcam
 
